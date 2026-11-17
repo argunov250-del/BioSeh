@@ -11,7 +11,6 @@ permissions:
 env:
   APK_PATH: android/app/build/outputs/apk/debug/app-debug.apk
   RELEASE_TAG: apk-latest
-  GRADLE_LOG: ${{ runner.temp }}/gradle-build.log
 
 jobs:
   build-web:
@@ -138,7 +137,7 @@ jobs:
           # classpath; a single network hiccup should not fail the job.
           for attempt in 1 2 3; do
             echo "::group::Gradle attempt $attempt"
-            if ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee "$GRADLE_LOG"; then
+            if ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee "$RUNNER_TEMP/gradle-build.log"; then
               echo "::endgroup::"
               exit 0
             fi
@@ -160,7 +159,7 @@ jobs:
             echo "ANDROID_HOME=${ANDROID_HOME:-unset} ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-unset}"
             ls -l android/local.properties android/gradlew 2>/dev/null || true
             echo '--- last 40 lines of Gradle output ---'
-            tail -n 40 "$GRADLE_LOG" 2>/dev/null || echo "no Gradle log captured"
+            tail -n 40 "$RUNNER_TEMP/gradle-build.log" 2>/dev/null || echo "no Gradle log captured"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
