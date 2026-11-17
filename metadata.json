@@ -1,0 +1,6 @@
+{
+  "name": "WHOOP Pulse — Biometric Performance & Recovery",
+  "description": "Высокотехнологичный биометрический трекер восстановления, кардионагрузки (Strain 0–21) и архитектуры сна с математическим моделированием на базе 30-дневной базовой линии ВСР (HRV) и ЧСС покоя (RHR).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
