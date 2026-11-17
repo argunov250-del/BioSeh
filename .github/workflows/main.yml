@@ -11,6 +11,7 @@ permissions:
 env:
   APK_PATH: android/app/build/outputs/apk/debug/app-debug.apk
   RELEASE_TAG: apk-latest
+  GRADLE_LOG: ${{ runner.temp }}/gradle-build.log
 
 jobs:
   build-web:
@@ -44,20 +45,54 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Inspect runner toolchain
+        run: |
+          {
+            echo "### Runner toolchain (pre-installed)"
+            echo '```'
+            java -version 2>&1 || true
+            echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+            SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+            ls "$SDK" 2>/dev/null || echo "no SDK at $SDK"
+            ls "$SDK/platforms" "$SDK/build-tools" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.4.4'
 
+      # The ubuntu-latest image ships a JDK and the Android SDK. These steps only
+      # pin/upgrade them, so a failure here must not stop the build: Gradle has to
+      # run and report the real problem instead.
       - name: Set up JDK
         uses: actions/setup-java@v5
+        continue-on-error: true
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'tools platform-tools platforms;android-36 build-tools;36.0.0'
+      - name: Ensure Android SDK packages
+        continue-on-error: true
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          {
+            echo "### Android SDK"
+            echo '```'
+            echo "sdk.dir=$SDK"
+            if [ -x "$SM" ]; then
+              "$SM" --sdk_root="$SDK" --install \
+                "platform-tools" "platforms;android-36" "build-tools;36.0.0" \
+                2>&1 | tail -n 20 || echo "sdkmanager install failed; AGP will download what it needs"
+            else
+              echo "sdkmanager not found; AGP will download what it needs"
+            fi
+            ls "$SDK/platforms" "$SDK/build-tools" 2>/dev/null || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -74,7 +109,7 @@ jobs:
       - name: Point Gradle at the SDK
         run: |
           chmod +x android/gradlew
-          printf 'sdk.dir=%s\n' "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" > android/local.properties
+          printf 'sdk.dir=%s\n' "${ANDROID_HOME:-/usr/local/lib/android/sdk}" > android/local.properties
           cat android/local.properties
 
       - name: Tune Gradle network settings
@@ -94,7 +129,7 @@ jobs:
           # classpath; a single network hiccup should not fail the job.
           for attempt in 1 2 3; do
             echo "::group::Gradle attempt $attempt"
-            if ./gradlew assembleDebug --no-daemon --stacktrace; then
+            if ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee "$GRADLE_LOG"; then
               echo "::endgroup::"
               exit 0
             fi
@@ -105,14 +140,20 @@ jobs:
           echo "Gradle build failed after 3 attempts" >&2
           exit 1
 
-      - name: Diagnose toolchain
+      - name: Report failure details
         if: failure()
         run: |
-          java -version
-          bun --version
-          echo "ANDROID_HOME=${ANDROID_HOME:-unset} ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-unset}"
-          sdkmanager --list_installed || true
-          ls -R android/app/build/outputs 2>/dev/null || true
+          {
+            echo "### Build failure"
+            echo '```'
+            java -version 2>&1 || true
+            bun --version || true
+            echo "ANDROID_HOME=${ANDROID_HOME:-unset} ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-unset}"
+            ls -l android/local.properties android/gradlew 2>/dev/null || true
+            echo '--- last 40 lines of Gradle output ---'
+            tail -n 40 "$GRADLE_LOG" 2>/dev/null || echo "no Gradle log captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish APK to GitHub Release
         env:
@@ -124,4 +165,7 @@ jobs:
                  --title "BioSeh APK (latest)" \
                  --notes "Debug-сборка из workflow Build BioSeh. Обновляется при каждом пуше в main."
           gh release upload "$RELEASE_TAG" "$APK_PATH" --clobber
-          echo "APK: https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/app-debug.apk" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### APK"
+            echo "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/app-debug.apk"
+          } >> "$GITHUB_STEP_SUMMARY"
