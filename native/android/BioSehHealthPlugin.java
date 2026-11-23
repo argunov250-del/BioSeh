@@ -137,7 +137,7 @@ public class BioSehHealthPlugin extends Plugin {
             } else if (record instanceof StepsRecord extra) {
                 measurement("steps", extra.getStartTime(), extra.getCount());
             } else if (record instanceof LeanBodyMassRecord extra) {
-                measurement("lean", extra.getTime(), extra.getMass().getInKilograms());
+                measurement("lean", extra.getTime(), extra.getMass().getInGrams() / 1000.0);
             } else if (record instanceof Vo2MaxRecord extra) {
                 measurement("vo2", extra.getTime(), extra.getVo2MillilitersPerMinuteKilogram());
             } else if (record instanceof RestingHeartRateRecord resting) {
