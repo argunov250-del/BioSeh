@@ -1,479 +1,173 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
+import { useState } from 'react';
+import { importAppleHealth } from './data/appleHealth';
+import { healthConnect, labels, nativeHealth, summarize, type History, type Kind } from './data/health';
 
-import React, { useEffect, useMemo, useState } from 'react';
-import {
-  Activity,
-  BatteryCharging,
-  BluetoothConnected,
-  Calendar,
-  ClipboardList,
-  LayoutDashboard,
-  Moon,
-  SlidersHorizontal,
-} from 'lucide-react';
-import {
-  ActivitySession,
-  DEFAULT_BASELINE,
-  DayKey,
-  DayRawData,
-  JournalEntries,
-  PresetScenarioId,
-  calculateDayStrain,
-  evaluateDayData,
-} from './utils/physiologyMath';
-import {
-  INITIAL_DAYS_DATA,
-  PRESET_SCENARIOS,
-  buildSevenDayTrend,
-} from './data/initialBiometrics';
-import { OverviewTab } from './components/OverviewTab';
-import { SleepRecoveryTab } from './components/SleepRecoveryTab';
-import { StrainHeartRateTab } from './components/StrainHeartRateTab';
-import { JournalSimulatorTab } from './components/JournalSimulatorTab';
+type Source = 'apple' | 'android';
+const storageKey = 'bioseh.apple.daily.v1';
+const number = new Intl.NumberFormat('ru', { maximumFractionDigits: 1 });
+const time = new Intl.DateTimeFormat('ru', { hour: '2-digit', minute: '2-digit' });
 
-type ActiveTab = 'overview' | 'sleep' | 'strain' | 'journal';
-
-const STORAGE_KEY = 'biosync_apex_whoop_state_v1';
+function savedAppleHistory(): History {
+  try {
+    return JSON.parse(localStorage.getItem(storageKey) ?? '{}') ?? {};
+  } catch {
+    return {};
+  }
+}
 
 export default function App() {
-  const [daysState, setDaysState] = useState<Record<DayKey, DayRawData>>(() => {
+  const [apple, setApple] = useState(savedAppleHistory);
+  const [android, setAndroid] = useState<History>({});
+  const [source, setSource] = useState<Source>(() =>
+    nativeHealth && !Object.keys(apple).length ? 'android' : 'apple');
+  const [selectedDate, setSelectedDate] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const history = source === 'apple' ? apple : android;
+  const dates = Object.keys(history).sort().reverse();
+  const date = dates.includes(selectedDate) ? selectedDate : dates[0];
+  const day = date ? history[date] : undefined;
+
+  async function importZip(file: File) {
+    setBusy(true);
+    setMessage('Читаем архив Apple Health…');
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && parsed.today && parsed.yesterday && parsed.twoDaysAgo) {
-          return parsed;
-        }
+      const imported = await importAppleHealth(file);
+      setApple(imported);
+      setSource('apple');
+      setSelectedDate('');
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(imported));
+        setMessage(`Импортировано дней: ${Object.keys(imported).length}.`);
+      } catch {
+        setMessage('Данные доступны до закрытия приложения. На устройстве не удалось сохранить импорт.');
       }
-    } catch {
-      // Fallback to initial data
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Не удалось импортировать архив.');
+    } finally {
+      setBusy(false);
     }
-    return INITIAL_DAYS_DATA;
-  });
+  }
 
-  const [selectedDay, setSelectedDay] = useState<DayKey>('today');
-  const [activeTab, setActiveTab] = useState<ActiveTab>('overview');
-
-  useEffect(() => {
+  async function connect() {
+    setBusy(true);
+    setMessage('Читаем записи Health Connect…');
+    // Remove the previous snapshot before checking whether permissions have changed.
+    setAndroid({});
+    setSource('android');
+    setSelectedDate('');
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(daysState));
-    } catch {
-      // Ignore storage quota errors
+      const { readings, granted, total } = await healthConnect.read();
+      setAndroid(summarize(readings));
+      if (!granted) setMessage('Разрешите чтение в настройках Health Connect и повторите попытку.');
+      else if (!readings.length) setMessage('За последние 30 дней доступных записей нет.');
+      else setMessage(`Данные обновлены. Разрешено типов записей: ${granted} из ${total}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Не удалось прочитать Health Connect.');
+    } finally {
+      setBusy(false);
     }
-  }, [daysState]);
+  }
 
-  const currentDayData = daysState[selectedDay];
-
-  // Evaluate all 3 days for accurate 7-day trend synchronization
-  const evaluatedToday = useMemo(
-    () => evaluateDayData(daysState.today, DEFAULT_BASELINE),
-    [daysState.today]
-  );
-  const evaluatedYesterday = useMemo(
-    () => evaluateDayData(daysState.yesterday, DEFAULT_BASELINE),
-    [daysState.yesterday]
-  );
-  const evaluatedTwoDaysAgo = useMemo(
-    () => evaluateDayData(daysState.twoDaysAgo, DEFAULT_BASELINE),
-    [daysState.twoDaysAgo]
-  );
-
-  const currentMetrics =
-    selectedDay === 'today'
-      ? evaluatedToday
-      : selectedDay === 'yesterday'
-      ? evaluatedYesterday
-      : evaluatedTwoDaysAgo;
-
-  const weeklyTrend = useMemo(
-    () =>
-      buildSevenDayTrend(
-        {
-          hrv: evaluatedToday.effectiveHrv,
-          rhr: evaluatedToday.effectiveRhr,
-          recovery: evaluatedToday.recoveryScore,
-          strain: evaluatedToday.dayStrain,
-          sleepPerf: evaluatedToday.sleepPerformance,
-        },
-        {
-          hrv: evaluatedYesterday.effectiveHrv,
-          rhr: evaluatedYesterday.effectiveRhr,
-          recovery: evaluatedYesterday.recoveryScore,
-          strain: evaluatedYesterday.dayStrain,
-          sleepPerf: evaluatedYesterday.sleepPerformance,
-        },
-        {
-          hrv: evaluatedTwoDaysAgo.effectiveHrv,
-          rhr: evaluatedTwoDaysAgo.effectiveRhr,
-          recovery: evaluatedTwoDaysAgo.recoveryScore,
-          strain: evaluatedTwoDaysAgo.dayStrain,
-          sleepPerf: evaluatedTwoDaysAgo.sleepPerformance,
-        }
-      ),
-    [evaluatedToday, evaluatedYesterday, evaluatedTwoDaysAgo]
-  );
-
-  // Handlers for mutating active day state
-  const handleAddActivity = (newActivity: ActivitySession) => {
-    setDaysState((prev) => ({
-      ...prev,
-      [selectedDay]: {
-        ...prev[selectedDay],
-        activities: [newActivity, ...prev[selectedDay].activities],
-      },
-    }));
-  };
-
-  const handleDeleteActivity = (activityId: string) => {
-    setDaysState((prev) => ({
-      ...prev,
-      [selectedDay]: {
-        ...prev[selectedDay],
-        activities: prev[selectedDay].activities.filter((a) => a.id !== activityId),
-      },
-    }));
-  };
-
-  const handleAddZoneMinutes = (
-    zoneIndex: 1 | 2 | 3 | 4 | 5,
-    minutes: number
-  ) => {
-    setDaysState((prev) => {
-      const day = prev[selectedDay];
-      const existingLiveIdx = day.activities.findIndex(
-        (a) => a.id === 'live-zone-session'
-      );
-
-      if (existingLiveIdx >= 0) {
-        const updatedActivities = [...day.activities];
-        const target = { ...updatedActivities[existingLiveIdx] };
-        const updatedZones = { ...target.zones };
-        const zoneKey = `zone${zoneIndex}Minutes` as keyof typeof updatedZones;
-        updatedZones[zoneKey] += minutes;
-
-        const { strain, calories } = calculateDayStrain(updatedZones, false);
-        target.zones = updatedZones;
-        target.durationMinutes += minutes;
-        target.strain = strain;
-        target.calories = calories;
-        updatedActivities[existingLiveIdx] = target;
-
-        return {
-          ...prev,
-          [selectedDay]: {
-            ...day,
-            activities: updatedActivities,
-          },
-        };
-      } else {
-        const initialZones = {
-          zone1Minutes: zoneIndex === 1 ? minutes : 0,
-          zone2Minutes: zoneIndex === 2 ? minutes : 0,
-          zone3Minutes: zoneIndex === 3 ? minutes : 0,
-          zone4Minutes: zoneIndex === 4 ? minutes : 0,
-          zone5Minutes: zoneIndex === 5 ? minutes : 0,
-        };
-        const { strain, calories } = calculateDayStrain(initialZones, false);
-        const liveSession: ActivitySession = {
-          id: 'live-zone-session',
-          title: 'Кардио-сессия (Strain Coach)',
-          sportType: 'Функциональный кроссфит',
-          startTime: 'Сейчас',
-          durationMinutes: minutes,
-          avgHr: zoneIndex >= 4 ? 164 : 145,
-          maxHr: 178,
-          calories,
-          strain,
-          zones: initialZones,
-        };
-        return {
-          ...prev,
-          [selectedDay]: {
-            ...day,
-            activities: [liveSession, ...day.activities],
-          },
-        };
-      }
-    });
-  };
-
-  const handleWakeTimeChange = (newWakeTime: string) => {
-    setDaysState((prev) => ({
-      ...prev,
-      [selectedDay]: {
-        ...prev[selectedDay],
-        wakeTime: newWakeTime,
-      },
-    }));
-  };
-
-  const handleUpdateJournal = (newJournal: JournalEntries) => {
-    setDaysState((prev) => ({
-      ...prev,
-      [selectedDay]: {
-        ...prev[selectedDay],
-        activePreset: 'custom',
-        journal: newJournal,
-      },
-    }));
-  };
-
-  const handleApplyPreset = (presetId: PresetScenarioId) => {
-    const presetConfig = PRESET_SCENARIOS.find((p) => p.id === presetId);
-    if (!presetConfig) return;
-
-    setDaysState((prev) => ({
-      ...prev,
-      [selectedDay]: presetConfig.applyToDay(prev[selectedDay]),
-    }));
-  };
-
-  const handleDirectSliderChange = (
-    field: 'baseHrv' | 'baseRhr' | 'sleepHours',
-    value: number
-  ) => {
-    setDaysState((prev) => {
-      const current = prev[selectedDay];
-      if (field === 'sleepHours') {
-        const totalMin = Math.round(value * 60);
-        return {
-          ...prev,
-          [selectedDay]: {
-            ...current,
-            activePreset: 'custom',
-            sleepStages: {
-              awakeMinutes: 30,
-              lightMinutes: Math.round(totalMin * 0.52),
-              remMinutes: Math.round(totalMin * 0.25),
-              swsMinutes: Math.round(totalMin * 0.23),
-            },
-          },
-        };
-      }
-
-      return {
-        ...prev,
-        [selectedDay]: {
-          ...current,
-          activePreset: 'custom',
-          [field]: value,
-        },
-      };
-    });
-  };
-
-  const handleResetAll = () => {
-    localStorage.removeItem(STORAGE_KEY);
-    setDaysState(INITIAL_DAYS_DATA);
-  };
+  function removeAppleHistory() {
+    try {
+      localStorage.removeItem(storageKey);
+      setApple({});
+      setMessage('Импорт Apple Health удалён с устройства.');
+    } catch {
+      setMessage('Не удалось удалить сохранённые данные.');
+    }
+  }
 
   return (
-    <div className="min-h-screen bg-[#0A0A0A] text-[#F4F4F6] flex flex-col items-center">
-      {/* Centered Mobile-First Shell (max-w-md) */}
-      <div className="w-full max-w-md min-h-screen bg-[#0A0A0A] sm:border-x sm:border-[#2C2C2E] flex flex-col justify-between relative pb-20">
-        {/* Sticky Top Header Bar */}
-        <header className="sticky top-0 z-30 bg-[#0A0A0A]/90 backdrop-blur-md border-b border-[#2C2C2E] px-4 py-3 space-y-2.5">
-          {/* Top Row: Brand Title + Strap Sync Status */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="font-display text-lg font-bold tracking-wider text-white uppercase">
-                BIO-SYNC
-              </span>
-              <span className="text-[10px] font-mono-num uppercase tracking-widest text-[#0EA5E9]">
-                APEX 4.0
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2 text-[11px] text-zinc-300 font-mono-num">
-              <BluetoothConnected className="w-3.5 h-3.5 text-[#22C55E]" />
-              <span>Синхронизировано</span>
-              <span>·</span>
-              <span className="flex items-center gap-1 text-[#22C55E] font-semibold">
-                <BatteryCharging className="w-4 h-4" />
-                84%
-              </span>
-            </div>
-          </div>
-
-          {/* Day Switcher ("Сегодня", "Вчера", "2 дня назад") + Quick Sim Shortcut */}
-          <div className="flex items-center justify-between gap-1.5">
-            <div className="grid grid-cols-3 gap-1 flex-1 bg-[#121212] p-1 rounded-xl border border-[#2C2C2E]">
-              {(['today', 'yesterday', 'twoDaysAgo'] as DayKey[]).map((dKey) => {
-                const dObj = daysState[dKey];
-                const isSelected = selectedDay === dKey;
-                return (
-                  <button
-                    key={dKey}
-                    type="button"
-                    onClick={() => setSelectedDay(dKey)}
-                    className={`py-1.5 px-2 rounded-lg text-[11px] font-semibold transition-all cursor-pointer truncate ${
-                      isSelected
-                        ? 'bg-[#2C2C2E] text-white shadow-sm'
-                        : 'text-zinc-400 hover:text-zinc-200'
-                    }`}
-                  >
-                    {dObj.title}
-                  </button>
-                );
-              })}
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab('journal')}
-              title="Открыть био-симулятор состояний"
-              className={`px-2.5 py-2 rounded-xl border text-[11px] font-semibold flex items-center gap-1 cursor-pointer shrink-0 transition-colors ${
-                activeTab === 'journal'
-                  ? 'bg-[#0EA5E9] border-[#0EA5E9] text-white'
-                  : 'bg-[#121212] border-[#2C2C2E] text-zinc-300 hover:border-zinc-600'
-              }`}
-            >
-              <SlidersHorizontal className="w-3.5 h-3.5" />
-              <span>Симулятор</span>
-            </button>
-          </div>
-
-          {/* Sub-bar with active date & recovery summary */}
-          <div className="flex items-center justify-between text-[11px] text-zinc-400 pt-0.5">
-            <span className="flex items-center gap-1.5">
-              <Calendar className="w-3.5 h-3.5 text-zinc-500" />
-              <span>
-                {currentDayData.title} ({currentDayData.dateFormatted})
-              </span>
-            </span>
-            <span className="font-mono-num">
-              Recovery{' '}
-              <strong style={{ color: currentMetrics.recoveryColor }}>
-                {currentMetrics.recoveryScore}%
-              </strong>{' '}
-              · Strain{' '}
-              <strong className="text-[#0EA5E9]">
-                {currentMetrics.dayStrain.toFixed(1)}
-              </strong>
-            </span>
-          </div>
+    <div className="min-h-screen bg-[#0A0A0A] text-zinc-100">
+      <main className="mx-auto max-w-md space-y-5 px-4 py-6">
+        <header>
+          <h1 className="font-display text-2xl font-bold">BioSeh</h1>
+          <p className="text-sm text-zinc-400">Показатели здоровья</p>
         </header>
 
-        {/* Main Viewport Content */}
-        <main className="flex-1 px-3.5 pt-3.5">
-          {activeTab === 'overview' && (
-            <OverviewTab
-              dayData={currentDayData}
-              metrics={currentMetrics}
-              baseline={DEFAULT_BASELINE}
-              onAddActivity={handleAddActivity}
-              onDeleteActivity={handleDeleteActivity}
-              onNavigateTab={(t) => setActiveTab(t)}
-            />
-          )}
-
-          {activeTab === 'sleep' && (
-            <SleepRecoveryTab
-              metrics={currentMetrics}
-              baseline={DEFAULT_BASELINE}
-              weeklyTrend={weeklyTrend}
-              onWakeTimeChange={handleWakeTimeChange}
-            />
-          )}
-
-          {activeTab === 'strain' && (
-            <StrainHeartRateTab
-              metrics={currentMetrics}
-              baseline={DEFAULT_BASELINE}
-              onAddZoneMinutes={handleAddZoneMinutes}
-            />
-          )}
-
-          {activeTab === 'journal' && (
-            <JournalSimulatorTab
-              dayData={currentDayData}
-              metrics={currentMetrics}
-              onUpdateJournal={handleUpdateJournal}
-              onApplyPreset={handleApplyPreset}
-              onDirectSliderChange={handleDirectSliderChange}
-              onResetAll={handleResetAll}
-            />
-          )}
-        </main>
-
-        {/* Fixed Bottom Navigation Bar (4 Tabs, Centered max-w-md) */}
-        <nav className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md z-40 bg-[#121212]/95 backdrop-blur-md border-t border-[#2C2C2E] px-2 py-1.5">
-          <div className="grid grid-cols-4 gap-1">
-            <button
-              type="button"
-              onClick={() => setActiveTab('overview')}
-              className={`min-h-[48px] rounded-xl flex flex-col items-center justify-center transition-colors cursor-pointer ${
-                activeTab === 'overview'
-                  ? 'text-white bg-[#1C1C1E]'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-            >
-              <LayoutDashboard
-                className={`w-5 h-5 ${
-                  activeTab === 'overview' ? 'text-[#22C55E]' : ''
-                }`}
+        <section className="space-y-3 rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+          <h2 className="font-semibold">Источники данных</h2>
+          <div className="grid gap-2">
+            {nativeHealth && (
+              <button type="button" disabled={busy} onClick={() => void connect()}
+                className="rounded-xl bg-sky-400 px-3 py-2 font-semibold text-zinc-950 disabled:opacity-50">
+                Подключить или обновить Health Connect
+              </button>
+            )}
+            <label className="grid gap-1 text-sm">
+              Импортировать ZIP из Apple Health
+              <input type="file" accept=".zip,application/zip,application/x-zip-compressed" disabled={busy}
+                className="w-full text-sm text-zinc-400 file:mr-2 file:rounded-lg file:border-0 file:bg-zinc-700 file:px-3 file:py-2 file:text-white"
+                onChange={event => {
+                  const file = event.currentTarget.files?.[0];
+                  event.currentTarget.value = '';
+                  if (file) void importZip(file);
+                }}
               />
-              <span className="text-[10px] font-semibold mt-1">Обзор</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab('sleep')}
-              className={`min-h-[48px] rounded-xl flex flex-col items-center justify-center transition-colors cursor-pointer ${
-                activeTab === 'sleep'
-                  ? 'text-white bg-[#1C1C1E]'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-            >
-              <Moon
-                className={`w-5 h-5 ${
-                  activeTab === 'sleep' ? 'text-[#38BDF8]' : ''
-                }`}
-              />
-              <span className="text-[10px] font-semibold mt-1">Сон</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab('strain')}
-              className={`min-h-[48px] rounded-xl flex flex-col items-center justify-center transition-colors cursor-pointer ${
-                activeTab === 'strain'
-                  ? 'text-white bg-[#1C1C1E]'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-            >
-              <Activity
-                className={`w-5 h-5 ${
-                  activeTab === 'strain' ? 'text-[#0EA5E9]' : ''
-                }`}
-              />
-              <span className="text-[10px] font-semibold mt-1">Нагрузка</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab('journal')}
-              className={`min-h-[48px] rounded-xl flex flex-col items-center justify-center transition-colors cursor-pointer ${
-                activeTab === 'journal'
-                  ? 'text-white bg-[#1C1C1E]'
-                  : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-            >
-              <ClipboardList
-                className={`w-5 h-5 ${
-                  activeTab === 'journal' ? 'text-[#EAB308]' : ''
-                }`}
-              />
-              <span className="text-[10px] font-semibold mt-1">
-                Дневник и Сим
-              </span>
-            </button>
+            </label>
           </div>
-        </nav>
-      </div>
+          {message && <p role="status" className="text-sm text-zinc-300">{message}</p>}
+        </section>
+
+        <section className="space-y-4">
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="grid gap-1 text-sm">
+              Источник
+              <select value={source} disabled={busy} className="rounded-lg bg-zinc-800 p-2"
+                onChange={event => { setSource(event.target.value as Source); setSelectedDate(''); setMessage(''); }}>
+                <option value="apple">Apple Health</option>
+                {nativeHealth && <option value="android">Health Connect</option>}
+              </select>
+            </label>
+            {!!dates.length && (
+              <label className="grid gap-1 text-sm">
+                Дата
+                <select value={date} onChange={event => setSelectedDate(event.target.value)}
+                  className="rounded-lg bg-zinc-800 p-2">
+                  {dates.map(key => <option key={key}>{key}</option>)}
+                </select>
+              </label>
+            )}
+          </div>
+
+          {!day ? (
+            <p className="rounded-2xl border border-zinc-800 p-4 text-sm text-zinc-400">
+              {source === 'apple' ? 'Выберите ZIP-архив, чтобы увидеть данные Apple Health.' : 'Подключите Health Connect, чтобы загрузить данные.'}
+            </p>
+          ) : (
+            <>
+              <dl className="grid grid-cols-2 gap-2">
+                {(Object.keys(labels) as Kind[]).map(kind => {
+                  const value = day.values[kind];
+                  return value === undefined ? null : (
+                    <div key={kind} className="rounded-xl border border-zinc-800 bg-zinc-900 p-3">
+                      <dt className="text-sm text-zinc-400">{labels[kind][0]}</dt>
+                      <dd className="text-lg font-semibold">{number.format(value)} <span className="text-xs">{labels[kind][1]}</span></dd>
+                    </div>
+                  );
+                })}
+              </dl>
+              {!!day.workouts.length && (
+                <ul className="divide-y divide-zinc-800 rounded-xl border border-zinc-800 px-3">
+                  {day.workouts.map((workout, index) => (
+                    <li key={index} className="flex justify-between gap-2 py-3 text-sm">
+                      <span>{workout.label || 'Тренировка'}</span>
+                      <span className="text-zinc-400">{time.format(workout.start)} · {number.format(((workout.end ?? workout.start) - workout.start) / 60000)} мин</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+          {source === 'apple' && !!dates.length && (
+            <button disabled={busy} type="button" onClick={removeAppleHistory} className="text-sm text-zinc-400 underline">
+              Удалить импорт Apple Health
+            </button>
+          )}
+        </section>
+      </main>
     </div>
   );
 }

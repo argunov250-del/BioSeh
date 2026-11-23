@@ -3,6 +3,8 @@ name: Build BioSeh
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -25,8 +27,10 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build web app
-        run: bun run build
+      - name: Check types and build web app
+        run: |
+          bun run lint
+          bun run build
 
       - name: Report web build
         run: |
@@ -109,7 +113,9 @@ jobs:
         run: bun run build
 
       - name: Generate Android project
-        run: bunx cap add android
+        run: |
+          bunx cap add android
+          python3 scripts/configure-android-health.py
 
       - name: Sync web build into Android project
         run: bunx cap sync android
@@ -133,6 +139,7 @@ jobs:
       - name: Build debug APK
         working-directory: android
         run: |
+          set -o pipefail
           # First runs download the Gradle distribution and the whole AGP/AndroidX
           # classpath; a single network hiccup should not fail the job.
           for attempt in 1 2 3; do
@@ -164,6 +171,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish APK to GitHub Release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
