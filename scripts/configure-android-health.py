@@ -36,7 +36,7 @@ manifest = ET.parse(manifest_path)
 app = manifest.find("application")
 app.set(f"{{{ns}}}allowBackup", "false")
 
-for suffix in ("HEART_RATE", "RESTING_HEART_RATE", "HEART_RATE_VARIABILITY", "RESPIRATORY_RATE", "OXYGEN_SATURATION", "SLEEP", "EXERCISE"):
+for suffix in ("VO2_MAX", "LEAN_BODY_MASS", "STEPS", "HEART_RATE", "RESTING_HEART_RATE", "HEART_RATE_VARIABILITY", "RESPIRATORY_RATE", "OXYGEN_SATURATION", "SLEEP", "EXERCISE"):
     permission = attrs(name=f"android.permission.health.READ_{suffix}")
     if not any(node.attrib == permission for node in manifest.findall("uses-permission")):
         ET.SubElement(manifest.getroot(), "uses-permission", permission)

@@ -24,6 +24,9 @@ import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 
 @CapacitorPlugin(name = "BioSehHealth", permissions = {
+    @Permission(alias = "steps", strings = {"android.permission.health.READ_STEPS"}),
+    @Permission(alias = "lean", strings = {"android.permission.health.READ_LEAN_BODY_MASS"}),
+    @Permission(alias = "vo2", strings = {"android.permission.health.READ_VO2_MAX"}),
     @Permission(alias = "heart", strings = {"android.permission.health.READ_HEART_RATE"}),
     @Permission(alias = "resting", strings = {"android.permission.health.READ_RESTING_HEART_RATE"}),
     @Permission(alias = "rmssd", strings = {"android.permission.health.READ_HEART_RATE_VARIABILITY"}),
@@ -33,7 +36,7 @@ import java.util.Arrays;
     @Permission(alias = "workout", strings = {"android.permission.health.READ_EXERCISE"})
 })
 public class BioSehHealthPlugin extends Plugin {
-    private static final String[] ALIASES = {"heart", "resting", "rmssd", "respiratory", "oxygen", "sleep", "workout"};
+    private static final String[] ALIASES = {"vo2", "lean", "steps", "heart", "resting", "rmssd", "respiratory", "oxygen", "sleep", "workout"};
 
     @PluginMethod
     public void read(PluginCall call) {
@@ -88,6 +91,9 @@ public class BioSehHealthPlugin extends Plugin {
             }
             granted++;
             switch (ALIASES[typeIndex]) {
+                case "steps": readPage(StepsRecord.class, -1); break;
+                case "lean": readPage(LeanBodyMassRecord.class, -1); break;
+                case "vo2": readPage(Vo2MaxRecord.class, -1); break;
                 case "heart": readPage(HeartRateRecord.class, -1); break;
                 case "resting": readPage(RestingHeartRateRecord.class, -1); break;
                 case "rmssd": readPage(HeartRateVariabilityRmssdRecord.class, -1); break;
@@ -128,6 +134,12 @@ public class BioSehHealthPlugin extends Plugin {
                 for (HeartRateRecord.HeartRateSample sample : heart.getSamples()) {
                     measurement("heart", sample.getTime(), sample.getBeatsPerMinute());
                 }
+            } else if (record instanceof StepsRecord extra) {
+                measurement("steps", extra.getStartTime(), extra.getCount());
+            } else if (record instanceof LeanBodyMassRecord extra) {
+                measurement("lean", extra.getTime(), extra.getMass().getInKilograms());
+            } else if (record instanceof Vo2MaxRecord extra) {
+                measurement("vo2", extra.getTime(), extra.getVo2MillilitersPerMinuteKilogram());
             } else if (record instanceof RestingHeartRateRecord resting) {
                 measurement("resting", resting.getTime(), resting.getBeatsPerMinute());
             } else if (record instanceof HeartRateVariabilityRmssdRecord hrv) {
@@ -140,6 +152,7 @@ public class BioSehHealthPlugin extends Plugin {
                 CharSequence title = exercise.getTitle();
                 interval("workout", exercise.getStartTime(), exercise.getEndTime(), title == null ? null : title.toString());
             } else if (record instanceof SleepSessionRecord sleep) {
+                interval("sleep", sleep.getStartTime(), sleep.getEndTime(), "bed", sleep.getEndTime());
                 if (sleep.getStages().isEmpty()) {
                     interval("sleep", sleep.getStartTime(), sleep.getEndTime(), null);
                 } else {
@@ -149,7 +162,17 @@ public class BioSehHealthPlugin extends Plugin {
                             case SleepSessionRecord.StageType.STAGE_TYPE_SLEEPING_LIGHT:
                             case SleepSessionRecord.StageType.STAGE_TYPE_SLEEPING_DEEP:
                             case SleepSessionRecord.StageType.STAGE_TYPE_SLEEPING_REM:
-                                interval("sleep", stage.getStartTime(), stage.getEndTime(), null, sleep.getEndTime());
+                                String label = switch (stage.getType()) {
+                                    case SleepSessionRecord.StageType.STAGE_TYPE_SLEEPING_LIGHT -> "light";
+                                    case SleepSessionRecord.StageType.STAGE_TYPE_SLEEPING_DEEP -> "deep";
+                                    case SleepSessionRecord.StageType.STAGE_TYPE_SLEEPING_REM -> "rem";
+                                    default -> "asleep";
+                                };
+                                interval("sleep", stage.getStartTime(), stage.getEndTime(), label, sleep.getEndTime());
+                                break;
+                            case SleepSessionRecord.StageType.STAGE_TYPE_AWAKE:
+                            case SleepSessionRecord.StageType.STAGE_TYPE_AWAKE_IN_BED:
+                                interval("sleep", stage.getStartTime(), stage.getEndTime(), "awake", sleep.getEndTime());
                                 break;
                         }
                     }

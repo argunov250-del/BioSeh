@@ -26,6 +26,11 @@ export function mergeHistory(previous: History, incoming: History): History {
   for (const [date, day] of Object.entries(incoming)) {
     const before = merged[date];
     merged[date] = {
+      phase: before?.phase, strengthRpe: before?.strengthRpe,
+      nightPulse: day.nightPulse ?? before?.nightPulse,
+      nightHrv: day.nightHrv ?? before?.nightHrv,
+      bpmMinutes: day.bpmMinutes ?? before?.bpmMinutes,
+      sleepIntervals: day.sleepIntervals ?? before?.sleepIntervals,
       values: { ...before?.values, ...day.values },
       workouts: day.values.workout === undefined ? before?.workouts ?? [] : day.workouts,
     };

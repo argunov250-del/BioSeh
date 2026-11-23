@@ -1,3 +1,5 @@
+import { AgeEstimate } from './AgeEstimate';
+import { analyze } from './data/analytics';
 import { useState } from 'react';
 import { Activity, ArrowUpRight, BarChart3, Database, Moon, RefreshCw, Upload } from 'lucide-react';
 import { importAppleHealth } from './data/appleHealth';
@@ -126,7 +128,22 @@ export default function App() {
   const day = history[date];
   const sleep = day?.values.sleep;
   const hrv = source === 'apple' ? 'sdnn' : 'rmssd';
+  const [maxInput,setMaxInput] = useState(() => localStorage.getItem('bioseh.maxHr') ?? '');
+  const heartMax = Number(maxInput);
+  const analytics = analyze(history,date,hrv,heartMax >= 90 && heartMax <= 250 ? heartMax : 0);
+  const weekDates = dates.filter(key => {
+    const age = Math.round((parseDate(date).getTime() - parseDate(key).getTime()) / 86400000);
+    return age >= 0 && age < 7;
+  });
+  const workoutDays = weekDates.filter(key => history[key].values.workout !== undefined);
+  const weeklyMinutes = workoutDays.reduce((sum, key) => sum + history[key].values.workout!, 0);
 
+  function annotate(patch: Partial<import('./data/health').Day>) {
+    if (!day) return;
+    const snapshot = {...history, [date]: {...day, ...patch}};
+    if (source === 'apple') setApple(snapshot); else setAndroid(snapshot);
+    saveHistory(source === 'apple' ? APPLE_HISTORY_KEY : ANDROID_HISTORY_KEY,snapshot,'Сохранено');
+  }
   function selectSource(next: Source) {
     setSource(next);
     setSelectedDate('');
@@ -227,6 +244,12 @@ export default function App() {
 
           {screen === 'night' && (
             <>
+              <section className="health-card">
+                <h2>Восстановление</h2>
+                <strong className="recovery-score">{analytics.recovery ?? '—'}<small>/ 100</small></strong>
+                <p>{analytics.recovery === undefined ? 'Для оценки нужны сон, ВСР и пульс в покое с личной историей.' : 'Отклонения от личной нормы за предыдущие 28 дней.'}</p>
+                <details><summary>Состав оценки</summary><p>{analytics.components.map(c=>labels[c.label as Kind][0] + ' ' + Math.round(c.score)).join(' · ') || 'Недостаточно наблюдений'}</p><p>{day?.nightHrv ? 'ВСР измерена во сне.' : 'Использована доступная дневная ВСР.'} Баллы — экспериментальная оценка приложения.</p></details>
+              </section>
               <section className="health-card health-hero">
                 <span className="health-caption"><Moon size={17} /> Сон за ночь</span>
                 <strong>{sleep === undefined ? '—' : duration(sleep)}</strong>
@@ -244,6 +267,16 @@ export default function App() {
                   <Metric kind="respiratory" value={day?.values.respiratory} />
                   <Metric kind="oxygen" value={day?.values.oxygen} />
                 </dl>
+              </section>
+              <section className="health-card"><h2>Качество сна</h2>
+                <p>Ночной стресс по пульсу: {analytics.stress === undefined ? 'недостаточно измерений' : number.format(analytics.stress)+'% наблюдаемых минут выше личного 90-го процентиля'}. Минут с данными: {analytics.observedMinutes}.</p>
+                {day && <details><summary>Учёт фазы цикла</summary>
+                  <label>Отметка за выбранный день <select value={day.phase ?? ''} onChange={e=>annotate({phase:e.target.value || undefined})}>
+                    {['','Менструация','Фолликулярная','Овуляторная','Лютеиновая'].map(p=><option key={p} value={p}>{p || 'Без отметки'}</option>)}
+                  </select></label><p>При пяти измерениях одного показателя в этой фазе Recovery использует её личную базу. Отмечено предыдущих дней: {analytics.matchedDays}.</p></details>}
+                <p>Ориентир сна {duration(analytics.need)} · Оценка {analytics.sleepScore === undefined ? '—' : Math.round(analytics.sleepScore) + '/100'}</p>
+                <p>{['Лёгкий','Глубокий','REM','Бодрствование'].map((label,i)=>label + ' ' + (analytics.night.stages[i] === undefined ? '—' : duration(analytics.night.stages[i]!))).join(' · ')}</p>
+                <p>Эффективность {analytics.night.efficiency === undefined ? '—' : Math.round(analytics.night.efficiency) + '%'} · Регулярность {analytics.regular === undefined ? '—' : Math.round(analytics.regular) + '%'}</p>
               </section>
               {!dates.length && <button type="button" className="health-primary" onClick={() => setScreen('sources')}>Подключить источник</button>}
             </>
@@ -265,6 +298,31 @@ export default function App() {
                 </div>
                 {period === 'week' ? <WeekChart key={selectedKind} history={history} date={date} kind={selectedKind} onDate={setSelectedDate} /> :
                   <MonthChart key={period + selectedKind} history={history} kind={selectedKind} months={Number(period)} />}
+              </section>
+              <section className="health-card">
+                                <h2>Кардионагрузка за день</h2>
+                <strong className="recovery-score">{analytics.load ? number.format(analytics.load.strain) : '—'}<small>/ 21</small></strong>
+                <p>{analytics.load ? analytics.load.zones.map((m,i)=>'З'+(i+1)+' · '+m+' мин').join(' / ') : 'Нужны соседние минуты с измерениями пульса, пульс в покое и личный максимальный пульс.'}</p>
+                <label>Максимальный пульс, уд/мин <input type="number" min="90" max="250" value={maxInput}
+                  onChange={e=>{setMaxInput(e.target.value);localStorage.setItem('bioseh.maxHr',e.target.value);}} /></label>
+              </section>
+              <section className="health-card"><h2>Мышечная нагрузка</h2>
+                <p>Для силовой тренировки укажи субъективную тяжесть занятия. Нагрузка в условных единицах — минуты × усилие.</p>
+                {day?.workouts.length ? day.workouts.map(w=>{
+                  const key = [w.start,w.end,w.label].join('/');
+                  const rpe = day.strengthRpe?.[key];
+                  return <label key={key} className="health-metric">{w.label || 'Тренировка'} · {time.format(w.start)}
+                    <select value={rpe ?? ''} onChange={e=>{const next={...day.strengthRpe}; if(e.target.value)next[key]=Number(e.target.value);else delete next[key]; annotate({strengthRpe:next});}}>
+                      <option value="">Не отмечена</option>{Array.from({length:10},(_,i)=><option key={i} value={i+1}>{i+1}/10</option>)}</select>
+                    {rpe && <b>{Math.round(rpe*((w.end ?? w.start)-w.start)/60000)} у.е.</b>}</label>
+                }) : <p>За выбранный день нет тренировок.</p>}</section>
+              <section className="health-card"><h2>Healthspan · 6 месяцев</h2>
+                <AgeEstimate factors={analytics.factors} days={analytics.days} /><p>Дней с данными: {analytics.days}. Средние приведены по дням с измерениями.</p>
+                <dl className="health-metrics">{analytics.factors.map(([name,value,unit])=><div className="health-metric" key={name}><dt>{name}</dt><dd>{value === undefined ? '—' : number.format(value)} <small>{unit}</small></dd></div>)}</dl>
+              </section><section className="health-card">
+                <div className="health-card-head"><h2>Тренировочный объём</h2><span>7 дней</span></div>
+                {workoutDays.length ? <><strong className="text-3xl">{duration(weeklyMinutes)}</strong>
+                  <p>Дней с записанными тренировками — {workoutDays.length}.</p></> : <p>За неделю нет записей тренировок.</p>}
               </section>
               <section className="health-card">
                 <div className="health-card-head"><h2>Тренировки за день</h2></div>

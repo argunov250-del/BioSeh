@@ -1,9 +1,13 @@
 import { BlobReader, ZipReader } from '@zip.js/zip.js';
 import { SaxesParser } from 'saxes';
-import { dateKey, summarize, type History, type Kind, type Reading } from './health';
+import { dateKey, heartMinutes, nightPulseBins, summarizeNights, summarize, type History, type Kind, type Reading } from './health';
 import { historyStart } from './history';
 
 const quantityTypes: Record<string, [Kind, string]> = {
+  HKQuantityTypeIdentifierStepCount: ['steps', 'count'],
+  HKQuantityTypeIdentifierVO2Max: ['vo2', 'mL/min·kg'],
+  HKQuantityTypeIdentifierLeanBodyMass: ['lean', 'kg'],
+  HKQuantityTypeIdentifierAppleSleepingWristTemperature: ['temperature', 'degC'],
   HKQuantityTypeIdentifierHeartRate: ['heart', 'count/min'],
   HKQuantityTypeIdentifierRestingHeartRate: ['resting', 'count/min'],
   HKQuantityTypeIdentifierHeartRateVariabilitySDNN: ['sdnn', 'ms'],
@@ -18,6 +22,8 @@ export async function readAppleArchive(file: File, progress: (percent: number) =
   const now = new Date();
   const cutoff = historyStart(now).getTime();
   const today = dateKey(now.getTime());
+  const hrvSamples: Reading[] = [];
+  const samples = new Map<number, number>();
   const intervals: Reading[] = [];
   const totals = new Map<string, Map<Kind, { sum: number; count: number }>>();
   // Bound duplicate detection independently of export size. Exact nearby samples may be repeated.
@@ -41,7 +47,7 @@ export async function readAppleArchive(file: File, progress: (percent: number) =
     if (depth !== 2 || (name !== 'Record' && name !== 'Workout')) return;
 
     const isSleep = attributes.type === 'HKCategoryTypeIdentifierSleepAnalysis'
-      && attributes.value?.startsWith('HKCategoryValueSleepAnalysisAsleep');
+      && /Asleep|Awake|InBed/.test(attributes.value ?? '');
     const metric = Object.hasOwn(quantityTypes, attributes.type) ? quantityTypes[attributes.type] : undefined;
     if (name !== 'Workout' && !isSleep && !metric) return;
 
@@ -58,16 +64,22 @@ export async function readAppleArchive(file: File, progress: (percent: number) =
 
     if (isSleep || name === 'Workout') {
       if (end <= start || !Number.isFinite(end)) return;
-      const label = name === 'Workout' ? attributes.workoutActivityType?.replace(/^HKWorkoutActivityType/, '') : undefined;
+      const label = name === 'Workout' ? attributes.workoutActivityType?.replace(/^HKWorkoutActivityType/, '') : (({
+        HKCategoryValueSleepAnalysisAsleepDeep: 'deep', HKCategoryValueSleepAnalysisAsleepCore: 'light',
+        HKCategoryValueSleepAnalysisAsleepREM: 'rem', HKCategoryValueSleepAnalysisAwake: 'awake',
+        HKCategoryValueSleepAnalysisInBed: 'bed',
+      } as Record<string,string>)[attributes.value] ?? 'asleep');
       intervals.push({ kind: isSleep ? 'sleep' : 'workout', start, end, label });
       return;
     }
-    if (!metric || attributes.unit !== metric[1] || !attributes.value?.trim()) return;
+    if (!metric || (attributes.unit !== metric[1] && !(metric[0] === 'vo2' && ['mL/kg/min','ml/kg/min'].includes(attributes.unit))) || !attributes.value?.trim()) return;
     const number = Number(attributes.value);
     const [kind] = metric;
     if (!Number.isFinite(number) || number <= 0 || (kind === 'oxygen' && number > 1)) return;
     const identity = kind + ':' + start + ':' + number;
     if (recent.has(identity)) return;
+    if (kind === 'sdnn') hrvSamples.push({kind,start,value:number});
+    if (kind === 'heart') samples.set(Math.floor(start / 60000), number);
     recent.add(identity);
     if (recent.size > recentLimit) recent.delete(recent.values().next().value!);
 
@@ -110,10 +122,26 @@ export async function readAppleArchive(file: File, progress: (percent: number) =
     await zip.close();
   }
 
+  // Group adjacent sleep stages under the wake date, including nights crossing midnight.
+  const stages = intervals.filter(r=>r.kind==='sleep').sort((a,b)=>b.end!-a.end!);
+  let wake = 0, earliest = Infinity;
+  for (const stage of stages) {
+    if (earliest-stage.end! > 90*60000) wake = stage.end!;
+    stage.dayAnchor = wake;
+    earliest = Math.min(earliest,stage.start);
+  }
   const history = summarize(intervals);
+  for (const [date,bins] of Object.entries(nightPulseBins(stages,samples))) {
+    if (history[date]) history[date].nightPulse = bins;
+  }
+  for (const [date,value] of Object.entries(summarizeNights(stages,hrvSamples))) {
+    if (history[date]) history[date].nightHrv = value;
+  }
+  const minutes = heartMinutes(samples);
   for (const [date, totalsByKind] of totals) {
     const day = history[date] ??= { values: {}, workouts: [] };
-    for (const [kind, { sum, count }] of totalsByKind) day.values[kind] = sum / count;
+    if (minutes[date]) day.bpmMinutes = minutes[date];
+    for (const [kind, { sum, count }] of totalsByKind) day.values[kind] = kind === 'steps' ? sum : sum / count;
   }
   if (!Object.keys(history).length && !validEarlierRecords) {
     throw new Error('В архиве нет поддерживаемых записей здоровья.');
