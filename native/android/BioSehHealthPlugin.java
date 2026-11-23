@@ -137,7 +137,8 @@ public class BioSehHealthPlugin extends Plugin {
             } else if (record instanceof OxygenSaturationRecord oxygen) {
                 measurement("oxygen", oxygen.getTime(), oxygen.getPercentage().getValue());
             } else if (record instanceof ExerciseSessionRecord exercise) {
-                interval("workout", exercise.getStartTime(), exercise.getEndTime(), exercise.getTitle());
+                CharSequence title = exercise.getTitle();
+                interval("workout", exercise.getStartTime(), exercise.getEndTime(), title == null ? null : title.toString());
             } else if (record instanceof SleepSessionRecord sleep) {
                 if (sleep.getStages().isEmpty()) {
                     interval("sleep", sleep.getStartTime(), sleep.getEndTime(), null);
